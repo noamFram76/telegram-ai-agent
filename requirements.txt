@@ -3,6 +3,3 @@ requests
 gunicorn
 
 google-cloud-vision
-git add requirements.txt
-git commit -m "add google vision"
-git push
