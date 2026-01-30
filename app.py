@@ -88,7 +88,7 @@ def summarize_for_students(ocr_text: str, img_bytes: bytes) -> str:
                 "content": [
                     {"type": "input_text", "text": prompt},
                     {"type": "input_text", "text": f"OCR (עזר בלבד):\n{ocr_text}"},
-                    {"type": "input_image", "image_base64": img_b64},
+                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{img_b64}"},
                 ],
             }
         ],
