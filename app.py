@@ -5,11 +5,15 @@ import json
 import base64
 from google.cloud import vision
 from openai import OpenAI
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from datetime import datetime
 
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+DOC_ID = os.environ["DOC_ID"]
 
 # GOOGLE_CREDENTIALS_JSON = כל ה-JSON של Google service account
 def get_vision_client():
@@ -55,7 +59,98 @@ def ocr_image_bytes(img_bytes: bytes) -> str:
 
     return text
 
-import base64
+def get_google_clients():
+    creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+    scopes = [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive.file",
+    ]
+    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+    docs = build("docs", "v1", credentials=creds)
+    drive = build("drive", "v3", credentials=creds)
+    return docs, drive
+
+
+def upload_image_to_drive(drive, img_bytes: bytes, filename: str) -> str:
+    from googleapiclient.http import MediaInMemoryUpload
+
+    media = MediaInMemoryUpload(img_bytes, mimetype="image/jpeg")
+    created = drive.files().create(
+        body={"name": filename},
+        media_body=media,
+        fields="id"
+    ).execute()
+
+    file_id = created["id"]
+
+    # public read so Docs can fetch the image via URL
+    drive.permissions().create(
+        fileId=file_id,
+        body={"type": "anyone", "role": "reader"},
+    ).execute()
+
+    # direct link usable by Docs insertInlineImage
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def append_lesson_to_doc(date_title: str, lesson_title: str, summary_text: str, image_url: str):
+    docs, _drive = get_google_clients()
+
+    # Read doc to find endIndex and whether today's header already exists
+    doc = docs.documents().get(documentId=DOC_ID).execute()
+    body_content = doc.get("body", {}).get("content", [])
+    end_index = body_content[-1].get("endIndex", 1) - 1
+
+    # Grab some tail text to check if the day header already exists
+    tail = ""
+    for el in body_content[-30:]:
+        p = el.get("paragraph")
+        if not p:
+            continue
+        for pe in p.get("elements", []):
+            t = pe.get("textRun", {}).get("content")
+            if t:
+                tail += t
+
+    requests_list = []
+
+    if date_title not in tail:
+        # new day section
+        requests_list += [
+            {"insertPageBreak": {"location": {"index": end_index}}},
+            {"insertText": {"location": {"index": end_index + 1}, "text": f"\n📅 {date_title}\n\n"}},
+        ]
+        end_index += 1 + len(f"\n📅 {date_title}\n\n")
+
+    # lesson title
+    requests_list.append({
+        "insertText": {"location": {"index": end_index}, "text": f"✏️ {lesson_title}\n"}
+    })
+    end_index += len(f"✏️ {lesson_title}\n")
+
+    # image
+    requests_list.append({
+        "insertInlineImage": {
+            "location": {"index": end_index},
+            "uri": image_url,
+            "objectSize": {
+                "height": {"magnitude": 300, "unit": "PT"},
+                "width": {"magnitude": 450, "unit": "PT"},
+            },
+        }
+    })
+    end_index += 1
+
+    # summary text
+    block = f"\n\n{summary_text}\n\n──────────────\n\n"
+    requests_list.append({
+        "insertText": {"location": {"index": end_index}, "text": block}
+    })
+
+    docs.documents().batchUpdate(
+        documentId=DOC_ID,
+        body={"requests": requests_list}
+    ).execute()
 
 def summarize_for_students(ocr_text: str, img_bytes: bytes) -> str:
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -151,6 +246,21 @@ def webhook():
         send_message(chat_id, "סיימתי OCR ✅ עכשיו מסכם בעזרת AI...")
         summary = summarize_for_students(ocr_text, img_bytes)
         send_message(chat_id, summary)
+
+        # Save to Google Doc
+        docs, drive = get_google_clients()
+        date_title = datetime.now().strftime("%A %d/%m/%Y")
+        image_url = upload_image_to_drive(
+            drive,
+            img_bytes,
+            f"board_{int(datetime.now().timestamp())}.jpg"
+        )
+        append_lesson_to_doc(
+            date_title=date_title,
+            lesson_title="לוח (כותרת אוטומטית בהמשך)",
+            summary_text=summary,
+            image_url=image_url
+        )
 
     except Exception as e:
         print("Processing exception:", str(e))

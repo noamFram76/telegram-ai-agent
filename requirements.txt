@@ -4,3 +4,5 @@ gunicorn
 
 google-cloud-vision
 openai
+google-api-python-client
+google-auth
