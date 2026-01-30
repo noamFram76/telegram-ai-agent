@@ -275,7 +275,7 @@ def webhook():
         summary = summarize_for_students(ocr_text, img_bytes)
         send_message(chat_id, summary)
 
-	docs, drive = get_google_clients_oauth()
+        docs, drive = get_google_clients_oauth()
         image_url = upload_image_to_drive(
             drive,
             img_bytes,
