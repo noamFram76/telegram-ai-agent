@@ -203,6 +203,8 @@ def summarize_for_students(ocr_text: str, img_bytes: bytes) -> str:
   המספרים שלא סומנו הם תרגול להשלים בבית → הם חלק משיעורי הבית.
 - מותר להסיק "להשלים את הטבלה" אם זה משתמע מהמבנה, גם אם לא כתוב במילים.
 - אל תמציא מספרים שלא מופיעים בתמונה.
+- אם מופיע מספר בודד תחת שיעורי בית (למשל 62) בלי טווח ובלי חוברת —
+  כתוב "עמוד 62" (ולא "חוברת/עמודים").
 
 החזר בפורמט הבא בלבד:
 
@@ -232,6 +234,12 @@ def summarize_for_students(ocr_text: str, img_bytes: bytes) -> str:
     )
 
     return (resp.output_text or "").strip()
+
+def extract_title_from_summary(summary: str) -> str:
+    for line in summary.splitlines():
+        if line.strip().startswith("נושא"):
+            return line.split(":", 1)[1].strip()
+    return "שיעור"
 
 @app.route("/", methods=["GET"])
 def home():
@@ -316,7 +324,7 @@ def webhook():
 
             append_lesson_to_doc(
                 date_title=date_title,
-                lesson_title="לוח כיתה",
+                lesson_title=extract_title_from_summary(summary),
                 summary_text=summary,
                 image_url=image_url
             )
