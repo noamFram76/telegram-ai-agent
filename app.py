@@ -3,6 +3,13 @@ import requests
 import os
 import json
 import base64
+import time
+import threading
+
+_processing_lock = threading.Lock()
+_recent_lock = threading.Lock()
+_recent_updates = {}
+
 from google.cloud import vision
 from openai import OpenAI
 from google.oauth2.service_account import Credentials
@@ -232,41 +239,62 @@ def home():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json or {}
-    msg = data.get("message") or data.get("edited_message") or {}
-    chat_id = (msg.get("chat") or {}).get("id")
-
-    if not chat_id:
-        return "OK", 200
-
-    # Ack מהיר
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "קיבלתי ✅ מתחיל OCR..."},
-            timeout=20,
-        )
-    except Exception as e:
-        print("Ack exception:", str(e))
-
-    # Photo (compressed) OR Document (sent as file)
-    file_id = None
-
-    if "photo" in msg and msg["photo"]:
-        file_id = msg["photo"][-1]["file_id"]
-    elif "document" in msg and msg["document"]:
-        mime = (msg["document"].get("mime_type") or "").lower()
-        if mime.startswith("image/"):
-            file_id = msg["document"]["file_id"]
-
-    if not file_id:
-        send_message(chat_id, "לא זיהיתי תמונה. שלח תמונה רגילה או כקובץ (Document) מסוג image.")
-        return "OK", 200
+    # בלם לופ: אם כבר מעבדים בקשה אחרת, נחזיר 200 כדי שטלגרם לא ימשיך להפציץ
+    if not _processing_lock.acquire(blocking=False):
+        return "BUSY", 200
 
     try:
+        data = request.json or {}
+        msg = data.get("message") or data.get("edited_message") or {}
+        chat_id = (msg.get("chat") or {}).get("id")
+
+        if not chat_id:
+            return "OK", 200
+
+        # מניעת כפילויות (idempotency) – אם אותה הודעה מגיעה שוב, לא נעבד שוב
+        update_id = data.get("update_id")
+        message_id = msg.get("message_id")
+        dedupe_key = f"{update_id}:{chat_id}:{message_id}"
+
+        now_ts = time.time()
+        with _recent_lock:
+            # ניקוי פריטים ישנים
+            for k, t0 in list(_recent_updates.items()):
+                if now_ts - t0 > 120:  # 2 דקות
+                    _recent_updates.pop(k, None)
+
+            if dedupe_key in _recent_updates:
+                return "OK", 200
+
+            _recent_updates[dedupe_key] = now_ts
+
+        # Ack מהיר
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": "קיבלתי ✅ מתחיל OCR..."},
+                timeout=20,
+            )
+        except Exception as e:
+            print("Ack exception:", str(e))
+
+        # Photo (compressed) OR Document (sent as file)
+        file_id = None
+        if "photo" in msg and msg["photo"]:
+            file_id = msg["photo"][-1]["file_id"]
+        elif "document" in msg and msg["document"]:
+            mime = (msg["document"].get("mime_type") or "").lower()
+            if mime.startswith("image/"):
+                file_id = msg["document"]["file_id"]
+
+        if not file_id:
+            send_message(chat_id, "לא זיהיתי תמונה. שלח תמונה רגילה או כקובץ (Document) מסוג image.")
+            return "OK", 200
+
+        # ----- עיבוד OCR + סיכום -----
         img_bytes = download_telegram_file(file_id)
-        ocr_text = ocr_image_bytes(img_bytes)
 
+        ocr_text = ocr_image_bytes(img_bytes)
         if not ocr_text:
             send_message(chat_id, "לא הצלחתי לחלץ טקסט מהתמונה 😕 נסה צילום חד/ישר מול הלוח.")
             return "OK", 200
@@ -275,39 +303,37 @@ def webhook():
         summary = summarize_for_students(ocr_text, img_bytes)
         send_message(chat_id, summary)
 
-        docs, drive = get_google_clients_oauth()
-        image_url = upload_image_to_drive(
-            drive,
-            img_bytes,
-            f"board_{int(datetime.now().timestamp())}.jpg"
-        )
+        # ----- שמירה למסמך: try נפרד כדי שלא יפיל את כל הזרימה -----
+        try:
+            docs, drive = get_google_clients_oauth()
+            image_url = upload_image_to_drive(
+                drive,
+                img_bytes,
+                f"board_{int(datetime.now().timestamp())}.jpg"
+            )
 
-        date_title = datetime.now().strftime("%A %d/%m/%Y")
+            date_title = datetime.now().strftime("%A %d/%m/%Y")
 
-        append_lesson_to_doc(
-            date_title=date_title,
-            lesson_title="לוח כיתה",
-            summary_text=summary,
-            image_url=image_url
-        )
+            append_lesson_to_doc(
+                date_title=date_title,
+                lesson_title="לוח כיתה",
+                summary_text=summary,
+                image_url=image_url
+            )
+        except Exception as e:
+            # לא מפילים את כל העיבוד – רק לוג
+            print("Google Docs/Drive failed:", str(e))
+            send_message(chat_id, "הסיכום נשלח ✅ אבל שמירה למסמך נכשלה (בודק לוגים).")
 
-        # Save to Google Doc
-        docs, drive = get_google_clients_oauth()
-        date_title = datetime.now().strftime("%A %d/%m/%Y")
-        image_url = upload_image_to_drive(
-            drive,
-            img_bytes,
-            f"board_{int(datetime.now().timestamp())}.jpg"
-        )
-        append_lesson_to_doc(
-            date_title=date_title,
-            lesson_title="לוח (כותרת אוטומטית בהמשך)",
-            summary_text=summary,
-            image_url=image_url
-        )
+        return "OK", 200
 
     except Exception as e:
         print("Processing exception:", str(e))
-        send_message(chat_id, f"שגיאה בעיבוד 😕\n{type(e).__name__}: {e}")
+        try:
+            send_message(chat_id, f"שגיאה בעיבוד 😕\n{type(e).__name__}: {e}")
+        except Exception:
+            pass
+        return "OK", 200
 
-    return "OK", 200
+    finally:
+        _processing_lock.release()
