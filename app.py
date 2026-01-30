@@ -2,6 +2,7 @@ from flask import Flask, request
 import requests
 import os
 import json
+import base64
 from google.cloud import vision
 from openai import OpenAI
 
@@ -54,42 +55,45 @@ def ocr_image_bytes(img_bytes: bytes) -> str:
 
     return text
 
-def summarize_for_students(ocr_text: str) -> str:
+import base64
+
+def summarize_for_students(ocr_text: str, img_bytes: bytes) -> str:
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    prompt = f"""
-אתה מסכם לוח מתמטיקה של בית ספר בעברית. קלט: טקסט OCR מבולגן (עברית/מספרים/סימנים ✓ X).
-מטרה: להחזיר סיכום מדויק, ברור וקצר להורים ולילדים.
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
-כללים חשובים:
-- אל תמציא. אם משהו לא מופיע/לא ברור: כתוב "לא ברור" או השאר ריק.
-- התעלם מרעש OCR (מילים באנגלית/ערבית/רוסית שלא קשורות).
-- אם יש נושא כמו "התחלקות ב-9" / "כפולות" / "כלל סכום ספרות" — תכתוב אותו ברור.
-- אם מופיעה רשימת כפולות (למשל 9,18,27...) — תכתוב אותה נקי.
-- אם יש טבלה של בדיקות (למשל עמודות: "ב-3", "ב-6", "ב-9") וסימוני ✓/X ליד מספרים:
-  * הפק טבלה/רשימה מסודרת: לכל מספר ציין עבור כל עמודה ✓/X רק אם זה מופיע.
-  * אל תשלים בעצמך ✓/X על סמך חישוב — רק מה שרואים בטקסט.
-- בסוף: אם מופיע משהו שנראה כמו שיעורי בית (למשל "חוברת 1 עמוד 66-69") — רשום תחת שיעורי בית.
+    prompt = """
+אתה מסכם לוח מתמטיקה בעברית לילדים ולהורים.
+אתה מקבל גם תמונה של הלוח וגם טקסט OCR מבולגן.
+השתמש קודם כל בתמונה כדי להבין מבנה (כותרות, טבלאות, ✓/X), והשתמש ב-OCR רק כהשלמה.
 
-החזר בדיוק במבנה הבא:
+כללים:
+- אל תמציא מספרים/שיעורי בית שלא מופיעים בתמונה.
+- כן מותר להסיק כלל מתמטי אם הוא כתוב בתמונה (גם אם OCR פספס).
+- החזר תשובה תכל'סית וברורה.
 
+החזר בפורמט:
 נושא:
 הכלל המרכזי:
 כפולות/רשימות מהלוח:
 בדיקות בטבלה (מספר → ב-3 / ב-6 / ב-9):
 שיעורי בית:
-מה לא ברור / חסר:
-
-טקסט OCR:
----
-{ocr_text}
----
 """
 
     resp = client.responses.create(
         model="gpt-5.2",
-        input=prompt
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_text", "text": f"OCR (עזר בלבד):\n{ocr_text}"},
+                    {"type": "input_image", "image_base64": img_b64},
+                ],
+            }
+        ],
     )
+
     return (resp.output_text or "").strip()
 
 @app.route("/", methods=["GET"])
@@ -138,7 +142,7 @@ def webhook():
             return "OK", 200
 
         send_message(chat_id, "סיימתי OCR ✅ עכשיו מסכם בעזרת AI...")
-        summary = summarize_for_students(ocr_text)
+        summary = summarize_for_students(ocr_text, img_bytes)
         send_message(chat_id, summary)
 
     except Exception as e:
