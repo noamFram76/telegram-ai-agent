@@ -1,27 +1,59 @@
 from flask import Flask, request
 import requests
 import os
+import json
+from google.cloud import vision
 
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
+def get_vision_client():
+    creds = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+    return vision.ImageAnnotatorClient.from_service_account_info(creds)
+
+def send_message(chat_id: int, text: str):
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": text[:3500]},
+        timeout=20
+    )
+
+@app.route("/", methods=["GET"])
+def home():
+    return "OK - telegram-ai-agent is running", 200
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
+    data = request.json or {}
+    print("UPDATE:", data)
 
-    if "message" in data and "photo" in data["message"]:
-        chat_id = data["message"]["chat"]["id"]
-        file_id = data["message"]["photo"][-1]["file_id"]
+    msg = data.get("message") or {}
+    chat = msg.get("chat") or {}
+    chat_id = chat.get("id")
 
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
-        file_path = requests.get(url).json()["result"]["file_path"]
+    # אם אין chat_id, אין לאן לענות
+    if not chat_id:
+        print("No chat_id in update")
+        return "OK", 200
 
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        img = requests.get(file_url).content
+    # 1) בדיקת דופק: נענה תמיד
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "קיבלתי את ההודעה ✅ מתחיל עיבוד..."},
+            timeout=20
+        )
+        print("sendMessage status:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("sendMessage exception:", str(e))
+        return "OK", 200
 
-        os.makedirs("images", exist_ok=True)
-        with open(f"images/{file_id}.jpg", "wb") as f:
-            f.write(img)
+    # 2) עכשיו נבדוק אם זו תמונה
+    if "photo" not in msg:
+        print("No photo in message. Keys:", list(msg.keys()))
+        return "OK", 200
 
-    return "OK"
+    # אם כן – המשך הקוד שלך להורדת קובץ + OCR...
+    # (אפשר להשאיר את ההמשך כפי שהוא)
+    return "OK", 200
