@@ -7,6 +7,8 @@ from google.cloud import vision
 from openai import OpenAI
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials as UserCredentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from datetime import datetime
 
 app = Flask(__name__)
@@ -14,6 +16,10 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 DOC_ID = os.environ["DOC_ID"]
+GOOGLE_OAUTH_CLIENT_ID = os.environ["GOOGLE_OAUTH_CLIENT_ID"]
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ["GOOGLE_OAUTH_CLIENT_SECRET"]
+GOOGLE_OAUTH_REFRESH_TOKEN = os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"]
+
 
 # GOOGLE_CREDENTIALS_JSON = כל ה-JSON של Google service account
 def get_vision_client():
@@ -59,6 +65,28 @@ def ocr_image_bytes(img_bytes: bytes) -> str:
 
     return text
 
+def get_google_clients_oauth():
+    scopes = [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/documents",
+    ]
+
+    creds = UserCredentials(
+        token=None,
+        refresh_token=GOOGLE_OAUTH_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_OAUTH_CLIENT_ID,
+        client_secret=GOOGLE_OAUTH_CLIENT_SECRET,
+        scopes=scopes,
+    )
+
+    # Refresh access token using refresh token
+    creds.refresh(GoogleAuthRequest())
+
+    docs = build("docs", "v1", credentials=creds)
+    drive = build("drive", "v3", credentials=creds)
+    return docs, drive
+
 def get_google_clients():
     creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
     scopes = [
@@ -94,7 +122,7 @@ def upload_image_to_drive(drive, img_bytes: bytes, filename: str) -> str:
 
 
 def append_lesson_to_doc(date_title: str, lesson_title: str, summary_text: str, image_url: str):
-    docs, _drive = get_google_clients()
+    docs, _drive = get_google_clients_oauth()
 
     # Read doc to find endIndex and whether today's header already exists
     doc = docs.documents().get(documentId=DOC_ID).execute()
@@ -247,8 +275,24 @@ def webhook():
         summary = summarize_for_students(ocr_text, img_bytes)
         send_message(chat_id, summary)
 
+	docs, drive = get_google_clients_oauth()
+        image_url = upload_image_to_drive(
+            drive,
+            img_bytes,
+            f"board_{int(datetime.now().timestamp())}.jpg"
+        )
+
+        date_title = datetime.now().strftime("%A %d/%m/%Y")
+
+        append_lesson_to_doc(
+            date_title=date_title,
+            lesson_title="לוח כיתה",
+            summary_text=summary,
+            image_url=image_url
+        )
+
         # Save to Google Doc
-        docs, drive = get_google_clients()
+        docs, drive = get_google_clients_oauth()
         date_title = datetime.now().strftime("%A %d/%m/%Y")
         image_url = upload_image_to_drive(
             drive,
